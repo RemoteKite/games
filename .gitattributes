@@ -1,0 +1,6 @@
+YSF/builder/README.md -text
+YSF/builder/SHA256SUMS.txt -text
+YSF/builder/build_manifest.json -text
+YSF/builder/build_patch.ps1 -text
+YSF/builder/build_patch.py -text
+YSF/builder/nani_parser.py -text
