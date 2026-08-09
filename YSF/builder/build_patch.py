@@ -590,6 +590,34 @@ def verify_archive(base: Path, expected_count: int) -> None:
         archive.read(entry.output_name)
 
 
+def archive_semantic_sha256(base: Path) -> str:
+    """Hash archive metadata and unpacked content, ignoring compression bytes."""
+    archive = Archive.open(base)
+    digest = hashlib.sha256()
+    digest.update(b"YSF-NANI-SEMANTIC-SHA256-V1\0")
+    digest.update(struct.pack("<II", archive.flags, len(archive.entries)))
+    na_file = io.BytesIO(archive.na_data)
+    for entry in archive.entries:
+        stored_name = entry.stored_name.encode("cp932")
+        digest.update(
+            struct.pack(
+                "<IIII",
+                entry.index,
+                entry.name_hash,
+                len(stored_name),
+                int(entry.compressed),
+            )
+        )
+        digest.update(stored_name)
+        data = NANI.read_entry(na_file, entry, MAX_ENTRY_SIZE)
+        if data is None:
+            digest.update(struct.pack("<Q", 0xFFFFFFFFFFFFFFFF))
+        else:
+            digest.update(struct.pack("<Q", len(data)))
+            digest.update(data)
+    return digest.hexdigest().upper()
+
+
 def output_hashes(output: Path) -> dict[str, str]:
     names = [
         "ysf_win_cn_dx9.exe",
@@ -616,7 +644,8 @@ OUTPUT_README = """# 《伊苏：菲尔盖纳之誓》2020 语音版汉化移植
 补丁使用独立的 `release/data_cn.na` 与 `release/data_cn.ni`，不会覆盖官方 `data_us`。
 设置程序保留 2020 的 Play Voice/BGM Type 功能，因此设置窗口仍为英文。
 
-构建输入、资源数量、语音覆盖率和成品 SHA-256 见 `移植报告.json`。
+构建输入、资源数量、语音覆盖率、封包语义哈希和成品 SHA-256 见
+`移植报告.json`。
 
 本版以日文脚本和日语原音为准修正已人工核对的语音文本：恢复
 `<voice:06016>`、`<voice:06017>` 的独立分句，重译 `<voice:07036>`、
@@ -693,6 +722,13 @@ def build(args: argparse.Namespace) -> Path:
         temporary / "release" / "data_cn",
         manifest["expected_stats"]["archive_entries"],
     )
+    semantic_hash = archive_semantic_sha256(temporary / "release" / "data_cn")
+    expected_semantic_hash = manifest["expected_archive_semantic_sha256"].upper()
+    if semantic_hash != expected_semantic_hash:
+        raise BuildError(
+            "输出封包的解压内容或语义元数据与参考成品不同\n"
+            f"预期 {expected_semantic_hash}\n实际 {semantic_hash}"
+        )
     (temporary / "README_移植说明.md").write_text(OUTPUT_README, encoding="utf-8")
 
     print("[6/6] 计算成品哈希并生成报告……")
@@ -706,17 +742,30 @@ def build(args: argparse.Namespace) -> Path:
         for name, value in hashes.items()
         if expected_hashes.get(name) != value
     }
+    archive_names = {"release/data_cn.ni", "release/data_cn.na"}
+    unexpected_mismatches = set(mismatches) - archive_names
+    if unexpected_mismatches:
+        names = "、".join(sorted(unexpected_mismatches))
+        raise BuildError(f"非封包成品与参考 SHA-256 不同：{names}")
     report = {
         "build_format_version": 1,
+        "build_environment": {
+            "python_version": sys.version.split()[0],
+            "zlib_compiled_version": zlib.ZLIB_VERSION,
+            "zlib_runtime_version": zlib.ZLIB_RUNTIME_VERSION,
+        },
         "source_sha256": source_hashes,
         "stats": stats,
         "dll_address_ports": manifest["dll_address_map"],
         "text_patch_records": len(manifest["text_address_map"]),
         "output_sha256": hashes,
+        "archive_semantic_sha256": semantic_hash,
+        "reference_semantic_match": True,
         "reference_byte_match": not mismatches,
         "reference_mismatches": mismatches,
         "verification": {
             "archive_full_decode": True,
+            "archive_semantic_sha256": True,
             "input_versions_exact": True,
             "pe_checksums_recalculated": True,
         },
@@ -729,9 +778,13 @@ def build(args: argparse.Namespace) -> Path:
     temporary.rename(output)
     print(f"构建完成：{output}")
     if mismatches:
-        print("注意：语义验证通过，但部分压缩字节与参考成品哈希不同。")
+        print("封包内容验证通过：1785 个条目的语义哈希与参考成品一致。")
+        print(
+            "提示：当前 zlib 压缩实现生成的 data_cn.ni/.na 字节与参考成品不同；"
+        )
+        print("      这不影响游戏使用或解压后的资源内容，详情见移植报告.json。")
     else:
-        print("全部七个二进制/封包文件与参考成品逐字节一致。")
+        print("封包语义哈希验证通过，全部七个成品也与参考成品逐字节一致。")
     return output
 
 
